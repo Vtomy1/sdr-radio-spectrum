@@ -1,0 +1,7 @@
+{
+  "name": "StratoSDR Radio & Frequency Scanner",
+  "description": "Professional Software Defined Radio (SDR) with real-time spectrum waterfall, automatic frequency scanner, signal detector, and multi-band RF demodulator.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+

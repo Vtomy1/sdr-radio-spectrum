@@ -10,6 +10,16 @@ export type ScanMode = 'scan-and-hold' | 'search-and-log' | 'memory-scan';
 
 export type ColorMap = 'turbo' | 'viridis' | 'inferno' | 'green' | 'ocean';
 
+export interface PeakHistoryItem {
+  id: string;
+  frequencyMHz: number;
+  powerDbm: number;
+  snrDb: number;
+  timestamp: number;
+  label?: string;
+  category?: string;
+}
+
 export interface RadioBand {
   id: string;
   name: string;

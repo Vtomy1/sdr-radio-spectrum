@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
-import { ColorMap, DemodMode } from '../types/radio';
+import { ColorMap, DemodMode, PeakHistoryItem } from '../types/radio';
 import { rfEngine } from '../services/rfEngine';
-import { ZoomIn, ZoomOut, MoveLeft, MoveRight, Sliders, Palette, Eye } from 'lucide-react';
+import { ZoomIn, ZoomOut, MoveLeft, MoveRight, Sliders, Palette, Eye, History, RotateCcw } from 'lucide-react';
 
 interface SpectrumDisplayProps {
   centerFreqMHz: number;
@@ -38,6 +38,12 @@ export const SpectrumDisplay: React.FC<SpectrumDisplayProps> = ({
   const [maxDb, setMaxDb] = useState<number>(-30);
   const [showPeakHold, setShowPeakHold] = useState<boolean>(true);
   const [hoverData, setHoverData] = useState<{ freqMHz: number; dbm: number; x: number; y: number } | null>(null);
+
+  // Peak History Tracking (Last 5 detected peaks)
+  const [peakHistory, setPeakHistory] = useState<PeakHistoryItem[]>([]);
+  const peakHistoryRef = useRef<PeakHistoryItem[]>([]);
+  peakHistoryRef.current = peakHistory;
+  const lastPeakLogTimeRef = useRef<number>(0);
 
   const visibleSpanMHz = baseSpanMHz / zoomFactor;
 
@@ -288,9 +294,9 @@ export const SpectrumDisplay: React.FC<SpectrumDisplayProps> = ({
       }
       specCtx.stroke();
 
-      // Peak readout bubble
+      // Peak readout bubble and Peak History Tracking
       if (peakDbm > minDb + 10) {
-        const peakFreq = startFreq + (peakBin / numBins) * visibleSpanMHz;
+        const peakFreq = parseFloat((startFreq + (peakBin / numBins) * visibleSpanMHz).toFixed(4));
         const peakX = (peakBin / numBins) * width;
         const peakY = ((maxDb - peakDbm) / (maxDb - minDb)) * specHeight;
 
@@ -305,6 +311,84 @@ export const SpectrumDisplay: React.FC<SpectrumDisplayProps> = ({
         const lx = Math.max(10, Math.min(width - 150, peakX + 6));
         const ly = Math.max(16, peakY - 6);
         specCtx.fillText(label, lx, ly);
+
+        // Check for Peak History Recording (throttled to ~300ms)
+        const now = Date.now();
+        if (now - lastPeakLogTimeRef.current > 300) {
+          lastPeakLogTimeRef.current = now;
+          const currentList = peakHistoryRef.current;
+          const existingIndex = currentList.findIndex(
+            (p) => Math.abs(p.frequencyMHz - peakFreq) < 0.02
+          );
+
+          if (existingIndex === 0) {
+            // It's already the most recent peak - refresh power & timestamp
+            if (now - currentList[0].timestamp > 1500 || peakDbm > currentList[0].powerDbm) {
+              const updated = [...currentList];
+              updated[0] = {
+                ...updated[0],
+                powerDbm: Math.round(peakDbm * 10) / 10,
+                timestamp: now,
+              };
+              setPeakHistory(updated);
+            }
+          } else {
+            // New distinct peak detected
+            const probe = rfEngine.checkSignalAt(peakFreq, 25);
+            const newItem: PeakHistoryItem = {
+              id: `peak_${peakFreq}_${now}`,
+              frequencyMHz: peakFreq,
+              powerDbm: Math.round(peakDbm * 10) / 10,
+              snrDb: Math.max(3, Math.round((peakDbm - minDb) * 10) / 10),
+              timestamp: now,
+              label: probe.station?.name,
+              category: probe.station?.category,
+            };
+
+            const filtered = currentList.filter(
+              (p) => Math.abs(p.frequencyMHz - peakFreq) >= 0.02
+            );
+            const nextList = [newItem, ...filtered].slice(0, 5);
+            setPeakHistory(nextList);
+          }
+        }
+      }
+
+      // Draw Peak History Markers on Spectrum Graph
+      const historyList = peakHistoryRef.current;
+      for (let idx = 0; idx < historyList.length; idx++) {
+        const item = historyList[idx];
+        if (item.frequencyMHz >= startFreq && item.frequencyMHz <= startFreq + visibleSpanMHz) {
+          const hX = ((item.frequencyMHz - startFreq) / visibleSpanMHz) * width;
+          const isCurrentVfo = Math.abs(centerFreqMHz - item.frequencyMHz) < 0.012;
+
+          // Vertical indicator line down from top
+          specCtx.strokeStyle = isCurrentVfo ? 'rgba(6, 182, 212, 0.6)' : 'rgba(245, 158, 11, 0.45)';
+          specCtx.lineWidth = 1;
+          specCtx.setLineDash([2, 3]);
+          specCtx.beginPath();
+          specCtx.moveTo(hX, 16);
+          specCtx.lineTo(hX, specHeight - 16);
+          specCtx.stroke();
+          specCtx.setLineDash([]);
+
+          // Tag flag at top of canvas
+          specCtx.fillStyle = isCurrentVfo ? '#0891b2' : '#b45309';
+          specCtx.beginPath();
+          specCtx.moveTo(hX - 9, 0);
+          specCtx.lineTo(hX + 9, 0);
+          specCtx.lineTo(hX + 9, 12);
+          specCtx.lineTo(hX, 16);
+          specCtx.lineTo(hX - 9, 12);
+          specCtx.closePath();
+          specCtx.fill();
+
+          specCtx.font = '8px "JetBrains Mono", monospace';
+          specCtx.fillStyle = '#ffffff';
+          specCtx.textAlign = 'center';
+          specCtx.fillText(`#${idx + 1}`, hX, 9);
+          specCtx.textAlign = 'left';
+        }
       }
 
       // --- Draw Waterfall (Bottom Canvas) ---
@@ -396,7 +480,18 @@ export const SpectrumDisplay: React.FC<SpectrumDisplayProps> = ({
 
     const startFreq = centerFreqMHz - visibleSpanMHz / 2;
     const clickedFreq = startFreq + (x / width) * visibleSpanMHz;
-    onTune(parseFloat(clickedFreq.toFixed(4)));
+
+    // Magnetic snap if clicked near a tracked peak history marker
+    const snappedPeak = peakHistoryRef.current.find((item) => {
+      const hX = ((item.frequencyMHz - startFreq) / visibleSpanMHz) * width;
+      return Math.abs(x - hX) <= 12;
+    });
+
+    if (snappedPeak) {
+      onTune(snappedPeak.frequencyMHz);
+    } else {
+      onTune(parseFloat(clickedFreq.toFixed(4)));
+    }
   };
 
   const handlePointerMove = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -545,6 +640,78 @@ export const SpectrumDisplay: React.FC<SpectrumDisplayProps> = ({
             WF: {waterfallSpeed === 3 ? 'FAST' : waterfallSpeed === 2 ? 'MED' : 'SLOW'}
           </button>
         </div>
+      </div>
+
+      {/* Peak Frequency History Ribbon: Last 5 Detected Peaks */}
+      <div className="flex items-center justify-between px-3 py-1.5 bg-[#0b101c] border-b border-slate-800/80 text-xs overflow-x-auto min-h-[34px]">
+        <div className="flex items-center gap-2 overflow-x-auto py-0.5">
+          <div className="flex items-center gap-1.5 text-[11px] font-mono text-slate-400 shrink-0 mr-1">
+            <History className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+            <span className="font-semibold text-slate-300 tracking-tight">HISTORY:</span>
+          </div>
+
+          {peakHistory.length === 0 ? (
+            <span className="text-[11px] text-slate-500 font-sans italic">
+              Monitoring spectrum · Last 5 active peak frequencies will appear here for 1-click recall
+            </span>
+          ) : (
+            <div className="flex items-center gap-1.5 flex-nowrap">
+              {peakHistory.map((item, idx) => {
+                const isTuned = Math.abs(centerFreqMHz - item.frequencyMHz) < 0.01;
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => onTune(item.frequencyMHz)}
+                    title={`Click to revert receiver to ${item.frequencyMHz.toFixed(4)} MHz (${item.powerDbm} dBm)${item.label ? ` - ${item.label}` : ''}`}
+                    className={`flex items-center gap-1.5 px-2 py-0.5 rounded font-mono text-xs transition-all border whitespace-nowrap cursor-pointer active:scale-95 ${
+                      isTuned
+                        ? 'bg-cyan-950/70 border-cyan-500/60 text-cyan-300 shadow-sm shadow-cyan-950'
+                        : 'bg-slate-900 border-slate-800 text-slate-300 hover:border-slate-700 hover:bg-slate-800 hover:text-white'
+                    }`}
+                  >
+                    <span className={`text-[10px] font-bold ${isTuned ? 'text-cyan-400' : 'text-slate-500'}`}>
+                      #{idx + 1}
+                    </span>
+                    <span className="font-bold text-slate-100">
+                      {item.frequencyMHz.toFixed(4)}
+                    </span>
+                    <span className="text-[10px] text-slate-500 font-sans">MHz</span>
+                    <span
+                      className={`text-[10px] ${
+                        item.powerDbm > -65
+                          ? 'text-emerald-400'
+                          : item.powerDbm > -85
+                          ? 'text-amber-400'
+                          : 'text-slate-400'
+                      }`}
+                    >
+                      {Math.round(item.powerDbm)} dBm
+                    </span>
+                    {item.label && (
+                      <span className="text-[10px] font-sans text-slate-400 max-w-[90px] truncate hidden md:inline">
+                        {item.label}
+                      </span>
+                    )}
+                    {isTuned && (
+                      <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse ml-0.5" />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        {peakHistory.length > 0 && (
+          <button
+            onClick={() => setPeakHistory([])}
+            title="Clear peak frequency history"
+            className="flex items-center gap-1 text-[11px] font-mono text-slate-500 hover:text-slate-300 px-2 py-0.5 rounded hover:bg-slate-800/80 transition-colors shrink-0 ml-2"
+          >
+            <RotateCcw className="w-3 h-3" />
+            <span className="hidden sm:inline">Clear</span>
+          </button>
+        )}
       </div>
 
       {/* Main Spectrum & Waterfall Interactive Viewport */}
